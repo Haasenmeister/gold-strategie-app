@@ -112,7 +112,7 @@ engine = TradingEngine()
 tz_ch = pytz.timezone('Europe/Zurich')
 now_ch = datetime.now(tz_ch)
 
-if now_ch.hour == 0 and now_ch.minute == 20:
+if now_ch.hour == 0 and now_ch.minute == 28:
     today_str = now_ch.strftime("%Y-%m-%d")
     if state.get("last_test_sent") != today_str:
         send_telegram_msg("⏰ Geplanter System-Test um 00:20 Uhr erfolgreich! Das Programm ist online und sendebereit.")
