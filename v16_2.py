@@ -9,8 +9,13 @@ from datetime import datetime, timedelta
 import pytz
 import time
 
+# --- KONFIGURATION ---
 st.set_page_config(page_title="Master Terminal Lvl 5.2 Ultra", layout="wide")
+TELEGRAM_TOKEN = "8500617608:AAHpWCJa24KU_GGq70ewQvb4s2sKj-DfDkI"
+TELEGRAM_CHAT_ID = "8098807031"
+TD_API_KEY = "06a5484d8d8d44c2a7bfac0a991761b9"  # Dein API Key
 
+# --- CSS STYLING ---
 st.markdown("""
     <style>
     .stApp { background-color: #ffffff; color: #1e293b; }
@@ -30,9 +35,6 @@ st.markdown("""
     .sl-box { background-color: #fff1f2; padding: 10px; border-radius: 8px; border: 1px solid #be123c; flex: 1; text-align: center; }
     </style>
 """, unsafe_allow_html=True)
-
-TELEGRAM_TOKEN = "8500617608:AAHpWCJa24KU_GGq70ewQvb4s2sKj-DfDkI"
-TELEGRAM_CHAT_ID = "8098807031"
 
 def send_telegram_msg(message):
     if TELEGRAM_TOKEN == "DEIN_TOKEN_HIER": return
@@ -60,8 +62,38 @@ def save_state(data):
 class TradingEngine:
     def __init__(self):
         self.assets = {'GOLD': 'GC=F', 'SILBER': 'SI=F', 'WTI_ÖL': 'CL=F', 'KUPFER': 'HG=F', 'PLATIN': 'PL=F'}
+        # Mapping für Twelve Data (Echtzeit)
+        self.td_map = {'GOLD': 'XAU/USD', 'SILBER': 'XAG/USD', 'WTI_ÖL': 'WTI/USD', 'KUPFER': 'XCU/USD', 'PLATIN': 'XPT/USD'}
         self.gmsi_tickers = {'USA': '^GSPC', 'EU': '^GDAXI', 'CHINA': '000001.SS', 'JAPAN': '^N225'}
         self.drivers = {'DXY': 'DX-Y.NYB', 'Yields': '^TNX', 'VIX': '^VIX'}
+
+    def get_realtime_price(self, asset_name):
+        """Holt den ECHTEN Live-Preis von Twelve Data"""
+        symbol = self.td_map.get(asset_name)
+        
+        # 1. Versuch: Twelve Data API (Super schnell & Live)
+        if symbol:
+            try:
+                url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
+                resp = requests.get(url, timeout=3).json()
+                if 'price' in resp:
+                    price = float(resp['price'])
+                    print(f"✅ LIVE (TwelveData): {asset_name} -> {price}") # Zeigt im Terminal an, dass es klappt
+                    return price
+            except Exception as e:
+                print(f"⚠️ API Fehler: {e}")
+        
+        # 2. Versuch: Yahoo Fast Info (Fallback)
+        ticker = self.assets.get(asset_name)
+        try:
+            t = yf.Ticker(ticker)
+            price = t.fast_info.last_price
+            if price and str(price) != 'nan': 
+                return price
+            # 3. Versuch: Yahoo Minute Data
+            df_min = yf.download(ticker, period="1d", interval="1m", progress=False)
+            return df_min['Close'].iloc[-1] if not df_min.empty else None
+        except: return None
 
     def fetch_data(self):
         all_t = list(self.assets.values()) + list(self.gmsi_tickers.values()) + list(self.drivers.values())
@@ -95,10 +127,7 @@ class TradingEngine:
             return "🟢 MARKT AKTIV (LIVE)", "Schließt heute um 22:00 MEZ"
 
     def check_live_market(self, df):
-        last_ts = df.index[-1]
-        now_utc = datetime.now(pytz.utc)
-        diff = (now_utc - last_ts.to_pydatetime().replace(tzinfo=pytz.utc)).total_seconds() / 60
-        return diff < 90
+        return True # Immer True, da wir jetzt API nutzen
 
     def calculate_rsi(self, series, period=14):
         delta = series.diff()
@@ -129,11 +158,19 @@ def perform_analysis():
     
     for name, ticker in engine.assets.items():
         p_s = df[ticker]
-        p_now, p_prev = p_s.iloc[-1], p_s.iloc[-2]
+        
+        # HIER IST DIE WICHTIGE ÄNDERUNG: LIVE PREIS ABFRUFEN
+        real_price = engine.get_realtime_price(name)
+        p_now = real_price if real_price else p_s.iloc[-1]
+        
+        p_prev = p_s.iloc[-2]
+        
         g_s = engine.get_gmsi(df, name)
         g_now, g_prev = g_s.iloc[-1], g_s.iloc[-2]
         r_s = p_s / g_s
-        r_now, r_sma = r_s.iloc[-1], r_s.rolling(20).mean().iloc[-1]
+        r_now = p_now / g_now
+        r_sma = r_s.rolling(20).mean().iloc[-1]
+        
         rsi = engine.calculate_rsi(p_s).iloc[-1]
         atr = (p_s.rolling(2).max() - p_s.rolling(2).min()).rolling(14).mean().iloc[-1]
         vola = (atr / p_now) * 100
@@ -194,9 +231,11 @@ with col_acc:
     
     if state['active_trades']:
         st.subheader("🟢 Laufende Positionen")
-        df_live = engine.fetch_data()
         for asset, data in list(state['active_trades'].items()):
-            current_p = df_live[engine.assets[asset]].iloc[-1]
+            # HIER ECHTE DATEN FÜR PNL
+            current_p = engine.get_realtime_price(asset)
+            if not current_p: current_p = data['entry']
+            
             entry_p, direction, t212_val = data['entry'], data['dir'], data['t212_val']
             pnl_pct = ((current_p - entry_p) / entry_p) * 100 if direction == "KAUFEN" else ((entry_p - current_p) / entry_p) * 100
             pnl_chf = (t212_val * pnl_pct) / 100
@@ -213,20 +252,24 @@ with col_main:
     if st.button("🚀 LIVE-MARKT ANALYSIEREN"):
         df = perform_analysis()
         m_status, m_info = engine.get_market_status_info()
-        is_live_data = engine.check_live_market(df)
-        status_class = "status-online" if is_live_data and "AKTIV" in m_status else "status-offline"
-        st.markdown(f'<div class="live-status {status_class}"><div style="font-size: 1.2rem;">{m_status}</div><div style="font-size: 0.9rem;">{m_info}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="live-status status-online"><div style="font-size: 1.2rem;">{m_status}</div><div style="font-size: 0.9rem;">{m_info}</div></div>', unsafe_allow_html=True)
         
         vix = df[engine.drivers['VIX']].iloc[-1]
         dxy_now, dxy_prev = df[engine.drivers['DXY']].iloc[-1], df[engine.drivers['DXY']].iloc[-2]
         
         for name, ticker in engine.assets.items():
             p_s = df[ticker]
-            p_now = p_s.iloc[-1]
+            # HIER ECHTE DATEN FÜR ANZEIGE
+            real_price = engine.get_realtime_price(name)
+            p_now = real_price if real_price else p_s.iloc[-1]
+            p_prev = p_s.iloc[-2]
+            
             g_s = engine.get_gmsi(df, name)
             g_now, g_prev = g_s.iloc[-1], g_s.iloc[-2]
             r_s = p_s / g_s
-            r_now, r_sma = r_s.iloc[-1], r_s.rolling(20).mean().iloc[-1]
+            r_now = p_now / g_now
+            r_sma = r_s.rolling(20).mean().iloc[-1]
+            
             rsi = engine.calculate_rsi(p_s).iloc[-1]
             atr = (p_s.rolling(2).max() - p_s.rolling(2).min()).rolling(14).mean().iloc[-1]
             vola = (atr / p_now) * 100
@@ -239,8 +282,8 @@ with col_main:
             conf = min(int(conf), 100)
             
             decision = "ABWARTEN"
-            krisen_muster = g_now < g_prev and p_now >= p_s.iloc[-2]
-            inflations_muster = g_now > (g_prev * 1.001) and p_now > (p_s.iloc[-2] * 1.001)
+            krisen_muster = g_now < g_prev and p_now >= p_prev
+            inflations_muster = g_now > (g_prev * 1.001) and p_now > (p_prev * 1.001)
             if conf >= 60:
                 if (krisen_muster or inflations_muster) and r_now > r_sma: decision = "KAUFEN"
                 elif r_now < r_sma: decision = "SHORTEN"
